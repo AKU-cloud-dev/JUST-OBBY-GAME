@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Obby 3D Admin - Spck</title>
+<style>
+  body{margin:0;background:#0b1220;color:#e5e7eb;font-family:system-ui,sans-serif;overflow:hidden;touch-action:none}
+  #hud{position:absolute;top:8px;left:8px;right:8px;display:flex;justify-content:space-between;font-size:13px;z-index:10;pointer-events:none}
+  #hud span{background:#00000088;padding:4px 8px;border-radius:8px}
+  #adminBar{position:absolute;top:40px;left:8px;background:#141e32dd;padding:8px 10px;border-radius:10px;font-size:12px;z-index:10}
+  #adminBar button{background:#374151;color:#fff;border:none;padding:5px 9px;border-radius:7px;margin:2px;font-weight:700}
+  #adminBar button.on{background:#16a34a}
+  #banBtn{background:#ef4444!important}
+  #controls{position:absolute;bottom:14px;left:14px;right:14px;display:flex;justify-content:space-between;pointer-events:none;z-index:10}
+ .joy{width:110px;height:110px;border-radius:50%;background:#1f293788;position:relative;pointer-events:auto}
+ .joyknob{width:44px;height:44px;border-radius:50%;background:#4b5563;position:absolute;left:33px;top:33px}
+  #rightBtns{display:flex;flex-direction:column;gap:8px;pointer-events:auto}
+  #rightBtns button{width:64px;height:52px;border-radius:12px;border:none;background:#1f2937cc;color:#fff;font-weight:700}
+  #jumpBtn{background:#16a34acc;height:64px}
+  #bannedScreen{position:absolute;inset:0;background:#0b1220;display:none;align-items:center;justify-content:center;flex-direction:column;z-index:99;text-align:center;padding:24px}
+  #bannedScreen.on{display:flex}
+  canvas{display:block}
+  small{color:#9ca3af}
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="hud">
+  <span>Stage: <b id="stageV">1 / 42</b></span>
+  <span id="nameV">ADMIN • MALANG</span>
+  <span>HP: 100</span>
+</div>
+
+<div id="adminBar">
+  <b>ADMIN PANEL</b> – kamu admin pertama<br>
+  <button id="flyBtn">Fly [F]</button>
+  <button id="banBtn">Ban Hammer [B]</button>
+  <button id="spawnBotBtn">Spawn Bot</button>
+  <button id="unbanBtn">Unban All</button><br>
+  <small>Klik bot pakai Ban Hammer → ke-ban permanen di device ini</small>
+</div>
+
+<div id="bannedScreen">
+  <h2 style="color:#ef4444">YOU ARE BANNED</h2>
+  <p>Kamu di-ban oleh admin di game ini.<br>Di build Spck ini ban-nya tersimpan di localStorage device ini aja.</p>
+  <button id="unbanSelfBtn" style="background:#374151;color:#fff;border:none;padding:10px 16px;border-radius:10px">Unban (Dev Only)</button>
+  <p><small>Untuk multiplayer beneran, banlist harus di server, bukan localStorage.</small></p>
+</div>
+
+<canvas id="game"></canvas>
+
+<div id="controls">
+  <div class="joy" id="joy"><div class="joyknob" id="knob"></div></div>
+  <div id="rightBtns">
+    <button id="jumpBtn">JUMP</button>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+
+// ---- BAN SYSTEM (localStorage, Spck prototype) ----
+const PLAYER_ID_KEY = 'obby_player_id_v1';
+let playerId = localStorage.getItem(PLAYER_ID_KEY);
+if(!playerId){ playerId = 'player_' + Math.random().toString(36).slice(2,9); localStorage.setItem(PLAYER_ID_KEY, playerId); }
+const BAN_KEY = 'obby_banlist_v1';
+function getBanList(){ try{ return JSON.parse(localStorage.getItem(BAN_KEY)||'[]')}catch(e){return []} }
+function isBanned(id){ return getBanList().includes(id); }
+function banId(id){
+  const list = getBanList();
+  if(!list.includes(id)){ list.push(id); localStorage.setItem(BAN_KEY, JSON.stringify(list)); }
+}
+function unbanAll(){ localStorage.setItem(BAN_KEY, '[]'); }
+
+if(isBanned(playerId)){
+  document.getElementById('bannedScreen').classList.add('on');
+  document.getElementById('unbanSelfBtn').onclick = ()=>{ unbanAll(); location.reload(); };
+  throw new Error('banned');
+}
+
+// ---- AUDIO (no CDN) ----
+let actx;
+function beep(freq, dur, type='sine', vol=0.25){
+  if(!actx) actx = new (window.AudioContext||window.webkitAudioContext)();
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.connect(g); g.connect(actx.destination);
+  o.frequency.value = freq; o.type = type;
+  g.gain.setValueAtTime(vol, actx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + dur);
+  o.start(); o.stop(actx.currentTime + dur);
+}
+const sfx = { jump:()=>beep(520,0.12), checkpoint:()=>beep(740,0.15), ban:()=>{beep(180,0.25,'sawtooth',0.3); setTimeout(()=>beep(90,0.3,'sawtooth',0.3),120)} };
+
+// ---- THREE SETUP ----
+const canvas = document.getElementById('game');
+const renderer = new THREE.WebGLRenderer({canvas, antialias:true});
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x6ba3d6);
+scene.fog = new THREE.Fog(0x6ba3d6, 40, 110);
+
+const camera = new THREE.PerspectiveCamera(72, window.innerWidth/window.innerHeight, 0.1, 200);
+const camTarget = new THREE.Vector3();
+
+const light = new THREE.DirectionalLight(0xffffff, 1.0);
+light.position.set(10,20,10); light.castShadow = true;
+scene.add(light, new THREE.AmbientLight(0x666688));
+
+// ---- OBBY COURSE ----
+const platforms = [];
+function addPlat(x,y,z, sx, sz, color=0xdddddd, moving=false){
+  const m = new THREE.Mesh(new THREE.BoxGeometry(sx,0.6,sz), new THREE.MeshStandardMaterial({color}));
+  m.position.set(x,y,z); m.receiveShadow = true;
+  m.userData = {sx, sz, baseX:x, baseZ:z, moving, t:Math.random()*Math.PI*2};
+  scene.add(m); platforms.push(m); return m;
+}
+// start pad
+addPlat(0,0,0, 5,5, 0x4ade80);
+// long course
+let pz = -8;
+for(let i=1;i<=42;i++){
+  const w = 2.2 + Math.sin(i*0.7)*0.3;
+  const gap = 2.8 + (i>20?1.2:0);
+  pz -= gap;
+  const xoff = Math.sin(i*0.9)* (i>15?2.5:1.2);
+  const moving = i % 7 === 0;
+  const color = i % 10 === 0? 0xfacc15 : 0xdddddd;
+  addPlat(xoff, 0, pz, w, w, color, moving);
+  if(i % 6 === 0){ // spinner
+    const spin = addPlat(xoff, 0.4, pz-1.5, 0.4, 3.2, 0xef4444, 'spin');
+    spin.userData.spin = true;
+  }
+}
+const finishZ = pz - 5;
+addPlat(0,0,finishZ, 6,6, 0x4ade80);
+
+// ---- PLAYER ----
+const player = new THREE.Mesh(
+  new THREE.CapsuleGeometry(0.4, 0.6, 4, 8),
+  new THREE.MeshStandardMaterial({color:0x3b82f6})
+);
+player.position.set(0,1.5,0);
+player.castShadow = true;
+scene.add(player);
+
+let vx=0, vy=0, vz=0;
+let onGround = false;
+let stage = 1;
+let flyMode = false;
+let banMode = false;
+
+// ---- FAKE MULTIPLAYER BOTS ----
+const bots = [];
+const botNames = ['RIZKY','BIMO','KEVIN','ALDO','FAJAR','DIO'];
+function spawnBot(){
+  const id = 'bot_' + Math.random().toString(36).slice(2,8);
+  if(isBanned(id)) return;
+  const color = new THREE.Color().setHSL(Math.random(),0.7,0.55);
+  const mesh = new THREE.Mesh(new THREE.CapsuleGeometry(0.38,0.55,4,8), new THREE.MeshStandardMaterial({color}));
+  mesh.position.set((Math.random()-0.5)*2, 1.2, -2 - Math.random()*6);
+  mesh.castShadow = true;
+  scene.add(mesh);
+  bots.push({id, mesh, name: botNames[Math.floor(Math.random()*botNames.length)], vz: 0.025 + Math.random()*0.015, t: Math.random()*10});
+}
+for(let i=0;i<3;i++) spawnBot();
+document.getElementById('spawnBotBtn').onclick = spawnBot;
+
+// ---- INPUT ----
+let moveX=0, moveY=0;
+const joy = document.getElementById('joy'), knob = document.getElementById('knob');
+function joyMove(e){
+  const r = joy.getBoundingClientRect();
+  const t = e.touches? e.touches[0] : e;
+  let x = (t.clientX - r.left - r.width/2) / (r.width/2);
+  let y = (t.clientY - r.top - r.height/2) / (r.height/2);
+  const len = Math.hypot(x,y); if(len>1){ x/=len; y/=len; }
+  moveX = x; moveY = -y;
+  knob.style.left = 33 + x*33 + 'px';
+  knob.style.top = 33 + y*33 + 'px';
+}
+function joyEnd(){ moveX=0; moveY=0; knob.style.left='33px'; knob.style.top='33px'; }
+joy.addEventListener('touchstart', joyMove); joy.addEventListener('touchmove', joyMove); joy.addEventListener('touchend', joyEnd);
+joy.addEventListener('mousedown', e=>{ const mm = ev=>joyMove(ev); const up = ()=>{joyEnd(); window.removeEventListener('mousemove',mm); window.removeEventListener('mouseup',up);}; window.addEventListener('mousemove',mm); window.addEventListener('mouseup',up); joyMove(e); });
+
+const keys = {};
+window.addEventListener('keydown', e=>{ keys[e.key.toLowerCase()] = true;
+  if(e.key.toLowerCase()==='f') toggleFly();
+  if(e.key.toLowerCase()==='b') toggleBan();
+  if(e.code==='Space'){ e.preventDefault(); doJump(); }
+});
+window.addEventListener('keyup', e=> keys[e.key.toLowerCase()] = false);
+
+function doJump(){
+  if(onGround || flyMode){ vy = flyMode? 0.18 : 0.24; sfx.jump(); }
+}
+document.getElementById('jumpBtn').onclick = doJump;
+
+// admin buttons
+function toggleFly(){ flyMode =!flyMode; document.getElementById('flyBtn').classList.toggle('on', flyMode); }
+function toggleBan(){ banMode =!banMode; document.getElementById('banBtn').classList.toggle('on', banMode); document.body.style.cursor = banMode? 'crosshair' : 'default'; }
+document.getElementById('flyBtn').onclick = toggleFly;
+document.getElementById('banBtn').onclick = toggleBan;
+document.getElementById('unbanBtn').onclick = ()=>{ unbanAll(); alert('Banlist cleared (local only)'); };
+
+// ban hammer raycast
+const raycaster = new THREE.Raycaster();
+canvas.addEventListener('click', e=>{
+  if(!banMode) return;
+  const rect = canvas.getBoundingClientRect();
+  const mouse = new THREE.Vector2(
+    ((e.clientX-rect.left)/rect.width)*2-1,
+    -((e.clientY-rect.top)/rect.height)*2+1
+  );
+  raycaster.setFromCamera(mouse, camera);
+  const targets = bots.map(b=>b.mesh);
+  const hits = raycaster.intersectObjects(targets);
+  if(hits.length){
+    const hitMesh = hits[0].object;
+    const bot = bots.find(b=>b.mesh===hitMesh);
+    if(bot){
+      sfx.ban();
+      // knockback effect
+      bot.mesh.material.color.set(0xff0000);
+      setTimeout(()=>{
+        scene.remove(bot.mesh);
+        banId(bot.id);
+        const idx = bots.indexOf(bot); if(idx>=0) bots.splice(idx,1);
+        alert(bot.name + ' di-ban! Dia nggak akan spawn lagi di device ini.');
+      }, 250);
+    }
+  }
+});
+
+// ---- GAME LOOP ----
+function checkPlatform(px,py,pz){
+  for(const p of platforms){
+    const dx = Math.abs(px - p.position.x);
+    const dz = Math.abs(pz - p.position.z);
+    const hx = p.userData.sx/2 + 0.35;
+    const hz = p.userData.sz/2 + 0.35;
+    const topY = p.position.y + 0.3;
+    if(dx < hx && dz < hz && py >= topY && py < topY + 1.2){
+      return topY + 0.65;
+    }
+  }
+  return null;
+}
+
+let lastCheckpointZ = 0;
+function loop(){
+  requestAnimationFrame(loop);
+
+  // move platforms
+  for(const p of platforms){
+    if(p.userData.moving === true){
+      p.userData.t += 0.025;
+      p.position.x = p.userData.baseX + Math.sin(p.userData.t)*1.8;
+    }
+    if(p.userData.spin){
+      p.rotation.y += 0.035;
+    }
+  }
+
+  // input move
+  let ix = moveX, iz = moveY;
+  if(keys['a']||keys['arrowleft']) ix -= 1;
+  if(keys['d']||keys['arrowright']) ix += 1;
+  if(keys['w']||keys['arrowup']) iz += 1;
+  if(keys['s']||keys['arrowdown']) iz -= 1;
+  const len = Math.hypot(ix,iz); if(len>1){ ix/=len; iz/=len; }
+
+  const speed = flyMode? 0.22 : 0.1;
+  vx = ix * speed;
+  vz = -iz * speed;
+
+  if(flyMode){
+    vy = (keys[' ']? 0.12 : 0) + (keys['shift']? -0.12 : 0);
+  } else {
+    vy -= 0.015; // gravity
+  }
+
+  player.position.x += vx;
+  player.position.y += vy;
+  player.position.z += vz;
+
+  // ground / platform collision
+  const groundY = checkPlatform(player.position.x, player.position.y, player.position.z);
+  if(groundY!== null){
+    player.position.y = groundY;
+    vy = 0;
+    onGround = true;
+    if(player.position.z < lastCheckpointZ - 3){
+      lastCheckpointZ = player.position.z;
+      stage = Math.min(42, Math.floor(Math.abs(player.position.z)/3.2));
+      document.getElementById('stageV').textContent = stage + ' / 42';
+      sfx.checkpoint();
+    }
+  } else {
+    onGround = false;
+    if(!flyMode && player.position.y < -8){
+      // respawn
+      player.position.set(0,1.5,0); vx=vy=vz=0;
+    }
+  }
+
+  // bots simple run
+  for(const b of bots){
+    b.mesh.position.z -= b.vz;
+    b.mesh.position.x += Math.sin(performance.now()*0.001 + b.t) * 0.006;
+    b.mesh.rotation.y += 0.04;
+    if(b.mesh.position.z < finishZ - 2){ b.mesh.position.z = 2; }
+  }
+
+  // camera follow
+  const camOff = new THREE.Vector3(0, 2.6, 4.8);
+  const targetCam = player.position.clone().add(camOff);
+  camera.position.lerp(targetCam, 0.12);
+  camTarget.lerp(new THREE.Vector3(player.position.x, player.position.y+0.5, player.position.z - 3), 0.15);
+  camera.lookAt(camTarget);
+
+  renderer.render(scene, camera);
+}
+loop();
+
+window.addEventListener('resize', ()=>{
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
